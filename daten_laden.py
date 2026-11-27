@@ -9,6 +9,7 @@
 # %% Pakete
 from pathlib import Path
 from urllib.parse import urljoin
+import re
 import zipfile
 
 import pandas as pd
@@ -18,7 +19,7 @@ from bs4 import BeautifulSoup  # falls es fehlt: pip install beautifulsoup4
 # %% Einstellungen
 ARCHIV_URL = "https://archive.opentransportdata.swiss/actual_data_archive.htm"
 JAHR = "2025"
-LINK_FILTER = ""  # z.B. "v1", falls es pro Monat mehrere Versionen gibt (siehe Zelle "Links finden")
+LINK_FILTER = "ist-daten-2025-"  # nur v1 (v1 hat alle 12 Monate, v2 erst ab Juli 2025)
 
 ROH = Path("daten/roh")              # hier landen die ZIPs kurzzeitig
 GEFILTERT = Path("daten/gefiltert")  # hier landen die kleinen Monats-CSVs
@@ -30,20 +31,21 @@ MAX_MONATE = 1        # wie viele Monate verarbeiten
 MAX_TAGE = 2          # wie viele Tagesdateien pro Monat
 ZIP_LOESCHEN = False  # im Testmodus ZIP behalten, damit du nicht neu herunterladen musst
 
-# Namen genau so, wie sie in der Spalte HALTESTELLEN_NAME stehen.
-# Mit der Zelle "Bahnhofsnamen prüfen" kontrollieren!
-BAHNHOEFE = [
-    "Zürich HB",
-    "Bern",
-    "Basel SBB",
-    "Genève",
-    "Lausanne",
-    "Luzern",
-    "Winterthur",
-    "Zürich Oerlikon",
-    "Olten",
-    "Zug",
-]
+# Die 10 Bahnhöfe mit dem höchsten DTV 2025 (SBB Open Data, «Passagierfrequenz»).
+# Gefiltert wird über die UIC-Nummer (Spalte BPUIC), so gibt es keine Probleme mit Schreibweisen.
+# Der Name dient nur zur Kontrolle.
+BAHNHOEFE = {
+    "8503000": "Zürich HB",
+    "8507000": "Bern",
+    "8505000": "Luzern",
+    "8506000": "Winterthur",
+    "8500010": "Basel SBB",
+    "8501120": "Lausanne",
+    "8503006": "Zürich Oerlikon",
+    "8501008": "Genève",
+    "8500218": "Olten",
+    "8503003": "Zürich Stadelhofen",
+}
 
 # Nur diese Spalten werden eingelesen (spart viel Zeit und Speicher).
 SPALTEN = [
@@ -66,13 +68,26 @@ NUR_ZUM_FILTERN = ["PRODUKT_ID", "AB_PROGNOSE_STATUS", "FAELLT_AUS_TF", "DURCHFA
 
 # %% Links finden
 def finde_zip_links():
-    """Holt die Archivseite und gibt alle ZIP-Links für JAHR zurück."""
-    antwort = requests.get(ARCHIV_URL, timeout=60)
-    antwort.raise_for_status()
-    soup = BeautifulSoup(antwort.text, "html.parser")
+    """Holt die Liste der ZIP-Links für JAHR.
+
+    Die Archivseite lädt ihre Dateiliste per JavaScript (list_dir.js) nach:
+    Im HTML steht eine Variable dir = '...', und das Skript ruft dann dir + '.php' auf.
+    Diese PHP-Adresse fragen wir hier direkt ab.
+    """
+    seite = requests.get(ARCHIV_URL, timeout=60)
+    seite.raise_for_status()
+    treffer = re.search(r"""dir\s*=\s*['"]([^'"]+)['"]""", seite.text)
+    if not treffer:
+        raise RuntimeError("Variable 'dir' nicht auf der Archivseite gefunden")
+    liste_url = urljoin(ARCHIV_URL, treffer.group(1) + ".php")
+    print(f"Dateiliste von: {liste_url}")
+
+    liste = requests.get(liste_url, timeout=60)
+    liste.raise_for_status()
+    soup = BeautifulSoup(liste.text, "html.parser")
     links = []
     for a in soup.find_all("a", href=True):
-        url = urljoin(ARCHIV_URL, a["href"])  # macht aus relativen Links ganze URLs
+        url = urljoin(liste_url, a["href"])  # macht aus relativen Links ganze URLs
         if url.lower().endswith(".zip") and JAHR in url and LINK_FILTER in url:
             links.append(url)
     return sorted(set(links))
@@ -82,8 +97,8 @@ links = finde_zip_links()
 print(f"{len(links)} Links gefunden:")
 for link in links:
     print(link)
-# Erwartet: 12 Links (einer pro Monat). Sind es mehr, LINK_FILTER oben setzen.
-# Sind es 0, werden die Links per JavaScript geladen, dann melde dich.
+# Erwartet: 12 Links (einer pro Monat, Version 1).
+# Sind es 0, schau dir die Adresse "Dateiliste von" im Browser an.
 
 
 # %% Funktionen
@@ -108,7 +123,7 @@ def ist_wahr(spalte):
 
 def filtere(df):
     """Behält nur die Zeilen, die wir für die Analyse brauchen."""
-    df = df[df["HALTESTELLEN_NAME"].isin(BAHNHOEFE)]
+    df = df[df["BPUIC"].fillna("").str.strip().isin(BAHNHOEFE.keys())]
     df = df[df["PRODUKT_ID"].fillna("").str.strip().str.lower().eq("zug")]
     df = df[df["AB_PROGNOSE_STATUS"].fillna("").str.strip().str.upper().eq("REAL")]
     df = df[~ist_wahr(df["FAELLT_AUS_TF"])]
@@ -168,18 +183,20 @@ for url in links[:MAX_MONATE]:
 print("Fertig.")
 
 
-# %% Bahnhofsnamen prüfen (einmal laufen lassen, nachdem die erste ZIP da ist)
-def zeige_bahnhofsnamen(zip_pfad, suchwoerter):
-    """Zeigt, wie die Bahnhöfe in der Datei wirklich heissen."""
+# %% Bahnhöfe prüfen (einmal laufen lassen, nachdem die erste ZIP da ist)
+def pruefe_bahnhoefe(zip_pfad):
+    """Zeigt für jede UIC-Nummer, wie der Bahnhof in den Ist-Daten heisst und wie viele Zeilen es gibt."""
     with zipfile.ZipFile(zip_pfad) as z:
         name = sorted(n for n in z.namelist() if n.lower().endswith(".csv"))[0]
         with z.open(name) as f:
-            df = pd.read_csv(f, sep=";", usecols=["HALTESTELLEN_NAME", "PRODUKT_ID"], dtype=str)
-    namen = df.loc[df["PRODUKT_ID"].str.lower() == "zug", "HALTESTELLEN_NAME"].dropna().unique()
-    for wort in suchwoerter:
-        treffer = sorted(n for n in namen if wort.lower() in n.lower())
-        print(f"{wort}: {treffer}")
+            df = pd.read_csv(f, sep=";", usecols=["BPUIC", "HALTESTELLEN_NAME", "PRODUKT_ID"], dtype=str)
+    df = df[df["PRODUKT_ID"].fillna("").str.strip().str.lower().eq("zug")]
+    df["BPUIC"] = df["BPUIC"].fillna("").str.strip()
+    for uic, erwartet in BAHNHOEFE.items():
+        treffer = df[df["BPUIC"] == uic]
+        namen = treffer["HALTESTELLEN_NAME"].unique().tolist()
+        print(f"{uic} {erwartet:20} -> {len(treffer):6,} Zeilen, Name in den Daten: {namen}")
+    # Steht bei einem Bahnhof 0 Zeilen, stimmt die Nummer nicht oder BPUIC ist anders formatiert.
 
 
-# zeige_bahnhofsnamen(next(ROH.glob("*.zip")), ["Zürich", "Bern", "Basel", "Gen", "Lausanne",
-#                                               "Luzern", "Winterthur", "Olten", "Zug"])
+# pruefe_bahnhoefe(next(ROH.glob("*.zip")))
