@@ -13,6 +13,7 @@ import re
 import zipfile
 
 import pandas as pd
+import subprocess
 import requests
 from bs4 import BeautifulSoup  # falls es fehlt: pip install beautifulsoup4
 
@@ -132,13 +133,31 @@ def filtere(df):
     return df.drop(columns=NUR_ZUM_FILTERN)
 
 
-def verarbeite_tagesdatei(z, name):
-    """Liest eine Tagesdatei aus der offenen ZIP in Häppchen und filtert jedes Häppchen sofort."""
+def lies_gefiltert(f):
+    """Liest eine geöffnete Tagesdatei in Häppchen und filtert jedes Häppchen sofort."""
     teile = []
-    with z.open(name) as f:
-        for chunk in pd.read_csv(f, sep=";", usecols=SPALTEN, dtype=str, chunksize=500_000):
-            teile.append(filtere(chunk))
+    for chunk in pd.read_csv(f, sep=";", usecols=SPALTEN, dtype=str, chunksize=500_000):
+        teile.append(filtere(chunk))
     return pd.concat(teile, ignore_index=True)
+
+
+def verarbeite_tagesdatei(z, zip_pfad, name):
+    """Liest eine Tagesdatei aus der ZIP.
+
+    Einzelne Dateien im Archiv sind mit "Deflate64" komprimiert, das kann Pythons zipfile
+    nicht lesen ("That compression method is not supported"). Dann entpacken wir die Datei
+    mit dem Programm unzip und lesen direkt aus dessen Ausgabe, ohne sie auf die Festplatte zu schreiben.
+    """
+    try:
+        with z.open(name) as f:
+            return lies_gefiltert(f)
+    except NotImplementedError:
+        prozess = subprocess.Popen(["unzip", "-p", str(zip_pfad), name], stdout=subprocess.PIPE)
+        try:
+            return lies_gefiltert(prozess.stdout)
+        finally:
+            prozess.stdout.close()
+            prozess.wait()
 
 
 def verarbeite_monat(zip_pfad, ziel_csv):
@@ -150,7 +169,7 @@ def verarbeite_monat(zip_pfad, ziel_csv):
             namen = namen[:MAX_TAGE]
         for name in namen:
             try:
-                tag = verarbeite_tagesdatei(z, name)
+                tag = verarbeite_tagesdatei(z, zip_pfad, name)
                 tage.append(tag)
                 print(f"  {name}: {len(tag):,} Zeilen behalten")
             except Exception as fehler:
