@@ -27,9 +27,9 @@ ROH.mkdir(parents=True, exist_ok=True)
 GEFILTERT.mkdir(parents=True, exist_ok=True)
 
 # Testmodus: zuerst klein anfangen! Für den vollen Lauf beide auf None setzen.
-MAX_MONATE = 1        # wie viele Monate verarbeiten
-MAX_TAGE = 2          # wie viele Tagesdateien pro Monat
-ZIP_LOESCHEN = False  # im Testmodus ZIP behalten, damit du nicht neu herunterladen musst
+MAX_MONATE = None
+MAX_TAGE = None
+ZIP_LOESCHEN = True  
 
 # Die 10 Bahnhöfe mit dem höchsten DTV 2025 (SBB Open Data, «Passagierfrequenz»).
 # Gefiltert wird über die UIC-Nummer (Spalte BPUIC), so gibt es keine Probleme mit Schreibweisen.
